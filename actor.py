@@ -39,9 +39,17 @@ class Actor(nn.Module):
         logit = self.forward(state)
 
         if strategy == 'greedy':
-            return torch.argmax(logit, dim=1).cpu().numpy()[0]
+            return torch.argmax(logit, dim=1).detach().cpu().numpy()[0]
         elif strategy == 'epsilon-greedy':
             if np.random.random_sample() < epsilon:
                 return self.env.action_space.sample()
             else:
-                return torch.argmax(logit, dim=1).cpu().numpy()[0]
+                return torch.argmax(logit, dim=1).detach().cpu().numpy()[0]
+
+    def _initialize(self):
+        """Initialize training parameters."""
+        for m in self.children():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+                nn.init.kaiming_normal_(m.weight)
+                if hasattr(m, 'bias'):
+                    nn.init.zeros_(m.bias)
