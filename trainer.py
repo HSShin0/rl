@@ -1,6 +1,7 @@
 """Trainer for policy gradient agent."""
 from argparse import ArgumentParser
 import gym
+import time
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -74,20 +75,26 @@ class Trainer:
                     self.agent.buffer.length < self.agent.buffer.capacity//5):
                 continue
 
-            if t % self.critic_update == 0:
+            if self.n_iter % self.critic_update == 0:
                 if not self.agent.buffer.can_sample(
                         self.agent.critic.params['batch_size']):
                     continue
                 critic_loss = self.agent.critic_update()
-                self.writer.add_scalar('loss/critic', critic_loss, self.n_iter)
+                if self.n_iter % (2 * self.critic_update) == 0:
+                    self.writer.add_scalar('loss/critic',
+                                           critic_loss,
+                                           self.n_iter)
                 print("episode-{} \t\t critic loss: {}".format(episode,
                                                                critic_loss))
-            if t % self.actor_update == 0:
+            if self.n_iter % self.actor_update == 0:
                 if not self.agent.buffer.can_sample(
                         self.agent.actor.params['batch_size']):
                     continue
                 actor_loss = self.agent.actor_update()
-                self.writer.add_scalar('loss/actor', actor_loss, self.n_iter)
+                if self.n_iter % (2 * self.actor_update) == 0:
+                    self.writer.add_scalar('loss/actor',
+                                           actor_loss,
+                                           self.n_iter)
                 print("episode-{} \t\t actor loss: {}".format(episode,
                                                               actor_loss))
             # if done, close environment
@@ -98,14 +105,16 @@ class Trainer:
         """Run training loop."""
         assert self.episode < self.max_episode,\
             'already done for maximal episode'
-
-        for ep in range(self.episode, self.max_episode):
+        while self.episode < self.max_episode:
             # train one episode
-            accumulated_rewards = self.run_one_episode(ep)
-            self.writer.add_scalar('Total Rewards', accumulated_rewards, ep)
+            accumulated_rewards = self.run_one_episode(self.episode)
+            self.writer.add_scalar('Total Rewards',
+                                   accumulated_rewards,
+                                   self.episode)
             self.agent.history['rewards'].append(accumulated_rewards)
             # Stop learning if critic "converges".
-            if len(self.agent.history['critic_loss']) > 10:
+            if (self.episode % 10 == 0 and
+                    len(self.agent.history['critic_loss']) > 10):
                 recent_crit_loss = np.array(
                         self.agent.history['critic_loss'][-10:])
                 mean_loss = recent_crit_loss.mean()
@@ -114,11 +123,9 @@ class Trainer:
                         mean_loss))
                     break
             # Save the parameters of models if ...
-            if ep % 5 == 0:
-                self.agent.save(self.savepath, ep)
-        self.episode = ep
-
-        print("Stop learning after {} episodes!".format(ep))
+            if self.episode % 50 == 0:
+                self.agent.save(self.savepath, self.episode)
+            self.episode += 1 
 
 
 def get_args():
@@ -158,7 +165,8 @@ def get_args():
                         (default=None)", default=None)
     parser.add_argument('--savepath', help="Path to save outputs\
                         (default=backup.pth)", default='backup.pth')
-
+    parser.add_argument('--cuda', help="cuda usage (default='auto')",
+                        choices=['auto', 'cpu', '0', '1'], default='auto')
     return parser.parse_args()
 
 
@@ -188,8 +196,15 @@ if __name__ == "__main__":
     actor_params.update(params)
     critic_params.update(params)
 
-    # Use GPU if it is available
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    # CPU/GPU device choice
+    if args.cuda == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    elif args.cuda == 'cpu':
+        device = torch.device('cpu')
+    else:
+        device = torch.device('cuda:{}'.format(args.cuda))
+    print('Use {}'.format(device))
+    time.sleep(0.5)
 
     actor = Actor(env, actor_params)
     critic = Critic(critic_params, q=True)  # Q-function
@@ -230,3 +245,5 @@ if __name__ == "__main__":
             }
     trainer = Trainer(agent, writer, trainer_params)
     trainer.run_training_loop()
+    print("Stop learning after {} episodes and {} steps!".format(trainer.episode,
+                                                                 trainer.n_iter))
