@@ -18,7 +18,7 @@ class Trainer:
         self.agent = agent
         self.writer = writer
 
-        self.seed = params['seed']
+        self._seed = params['seed']
         self.render = params['render']
         self.max_episode = params['max_episode']
         self.random_expl = params['random_expl']
@@ -31,11 +31,13 @@ class Trainer:
         self.n_iter = 0  # number of iteration of sampling
         self.episode = 0
 
-    def _fix_random_seed(self):
-        np.random.seed(self.seed)
+        self._fix_random_seed(self._seed)
+
+    def _fix_random_seed(self, seed):
+        np.random.seed(seed)
         torch.backends.cudnn.deterministic = True
-        torch.manual_seed(self.seed)
-        torch.cuda.manual_seed_all(self.seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
     def run_one_episode(self, episode):
         """Train one episode."""
