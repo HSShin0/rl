@@ -10,7 +10,6 @@ from actor import Actor
 from critic import Critic
 from agent import Agent
 
-
 class Trainer:
     """Trainer for policy gradient agent."""
 
@@ -194,6 +193,7 @@ if __name__ == "__main__":
             'gamma': args.gamma,
             }
     actor_params.update(params)
+
     critic_params.update(params)
 
     # CPU/GPU device choice
