@@ -10,19 +10,20 @@ Note:
         the weight for the gradient "r + gamma * V(s') - V(s)"
         becomes "r - V(s)", which looks inadequate.
         MORE RIGOROUS REASON ??
+    2. target networks
 """
+import time
+import numpy as np
 import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 
 
 class Agent:
     """Actor-Critic agent."""
 
     def __init__(self, env, actor, critic, buffer, actor_optim,
-                 critic_optim, params, device):
+                 critic_optim, params, device, target_update_lag=5):
         self.env = env
         self.actor = actor
         self.critic = critic
@@ -30,6 +31,23 @@ class Agent:
         self.actor_optim = actor_optim
         self.critic_optim = critic_optim
         self.device = device
+
+        if isinstance(critic, list):
+            assert isinstance(critic_optim, list) and len(critic_optim) == len(critic) == 2, \
+                    'Wrong number of critics and optimizers for target networks'
+            self.use_target = True
+            self.critics = self.critic
+            self.critic = self.critics[0]
+            self.target = self.critics[1]
+            self.critic_optims = self.critic_optim
+            self.critic_optim = self.critic_optims[0]
+            self.target_optim = self.critic_optims[1]
+            self._every_target_update = target_update_lag
+        else:
+            self.use_target = False
+        # We will exchange critic and target after updating
+        # critic self._every_target_update times.
+        self.n_critic_update = 0
 
         self.params = params
         self.obser_n = params['obser_n']
@@ -42,21 +60,45 @@ class Agent:
                         'actor_loss': [],
                         }
 
-    def advantage(self, obser, reward, obser_next, done=None):
+    def _update_target(self):
+        """Update target network."""
+        if self.use_target:
+            for cri_param, tar_param in zip(self.critic.parameters(), self.target.parameters()):
+                with torch.no_grad():
+                    tar_param.copy_(cri_param)
+            def _test():
+                batch_size = self.critic.params['batch_size']
+                if not self.buffer.can_sample(batch_size):
+                    return None
+                # Sampling a batch of paths from the replay buffer
+                t, obs, act, rew, obs_next, done = self.get_batch_samples(batch_size, recent=False)
+                err = torch.mean(abs(self.critic(obs) - self.target(obs)))
+                assert err < 1e-6, 'wrong update'
+                return 0
+            #with torch.no_grad():
+            #    _test()
+            
+
+
+    def advantage(self, obser, reward, obser_next, done=None, critic_learning=False):
         """
         Compute advantage.
+        
+        obser (torch.FloatTensor): shape [N, (shape of observation_space)]
 
         return (torch.Tensor): shape [N, 1]
         """
         batch_size = len(obser)
-
         val = self.critic.forward(obser)
-        val_next = self.critic.forward(obser_next)
-        # If the critic is Q-function, use "max Q"
+        if critic_learning and self.use_target:
+            val_next = self.target.forward(obser_next)
+        else:
+            val_next = self.critic.forward(obser_next)
+        # If the critic is Q-function, use "max Q" for estimating "V".
         if self.critic._q:
             val, _ = val.max(dim=1, keepdim=True)
             val_next, _ = val_next.max(dim=1, keepdim=True)
-        # if done, do not add (V or) Q-value of next observation state
+        # If done, do not add (V or) Q-value of next observation state.
         if isinstance(done, np.ndarray):
             val_next[done] = 0
         advantage = reward.reshape(batch_size, 1) + self.gamma * val_next - val
@@ -65,7 +107,7 @@ class Agent:
 
     def get_batch_samples(self, batch_size, recent=False):
         """
-        Sampling a batch of ("recent" if recent=True)  paths from the replay buffer
+        Sampling a batch of ("recent" if recent=True) paths from the replay buffer.
         """
         samples = self.buffer.get_samples(batch_size, recent)
 
@@ -94,7 +136,7 @@ class Agent:
 
         timestep, obser, action, reward, obser_next, done = self.get_batch_samples(batch_size, recent=True)
 
-        # Compute present policy 
+        # Compute present policy
         policy_logit = self.actor.forward(obser)
         # Compute advantage
         advantage = self.advantage(obser,
@@ -116,9 +158,9 @@ class Agent:
         batch_size = self.critic.params['batch_size']
         if not self.buffer.can_sample(batch_size):
             return None
-        # sampling a batch of paths from the replay buffer
-        timestep, obser, action, reward, obser_next, done = self.get_batch_samples(batch_size, recent=False)
-        advantage = self.advantage(obser, reward, obser_next, done)
+        # Sampling a batch of paths from the replay buffer
+        t, obs, act, rew, obs_next, done = self.get_batch_samples(batch_size, recent=False)
+        advantage = self.advantage(obs, rew, obs_next, done, critic_learning=True)
         loss = torch.norm(advantage, p=2) / batch_size
         # Gradient descent
         self.critic_optim.zero_grad()
@@ -128,6 +170,10 @@ class Agent:
         loss_np = loss.detach().cpu().numpy()
         self.history['critic_loss'].append(loss_np)
 
+        self.n_critic_update += 1 
+        # Exchange critic and target network 
+        if self.use_target and self.n_critic_update % self._every_target_update == 0:
+            self._update_target()
         return loss_np
 
     def train_one_episode(self):
