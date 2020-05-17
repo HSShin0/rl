@@ -35,6 +35,9 @@ class Trainer:
         self.episode = 0
 
         self._fix_random_seed(self._seed)
+        if self.agent.use_target:
+            # initial target network is the same as critic network.
+            self.agent._update_target()
 
     def _fix_random_seed(self, seed):
         np.random.seed(seed)
