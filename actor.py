@@ -32,18 +32,25 @@ class Actor(nn.Module):
         '''
         Choose an action for given a state following the strategy
 
-        strategy in ['greedy', 'epsilon-greedy']
+        strategy in ['greedy', 'epsilon-greedy', 'random']
 
         state: torch.Tensor of shape [1, obser_n]
         '''
-        logit = self.forward(state)
+        assert strategy in ['greedy', 'epsilon-greedy', 'random'], \
+            "wrong strategy"
 
+        if strategy == 'random':
+            return self.env.action_space.sample()
         if strategy == 'greedy':
+            with torch.no_grad():
+                logit = self.forward(state)
             return torch.argmax(logit, dim=1).detach().cpu().numpy()[0]
         elif strategy == 'epsilon-greedy':
             if np.random.random_sample() < epsilon:
                 return self.env.action_space.sample()
             else:
+                with torch.no_grad():
+                    logit = self.forward(state)
                 return torch.argmax(logit, dim=1).detach().cpu().numpy()[0]
 
     def _initialize(self):

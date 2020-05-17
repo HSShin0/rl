@@ -1,37 +1,33 @@
 """Trainer for policy gradient agent."""
-from argparse import ArgumentParser
-import gym
 import time
+from argparse import ArgumentParser
+
+import gym
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from utils.replay_buffer import ReplayBuffer
+
 from actor import Actor
-from critic import Critic
 from agent import Agent
+from critic import Critic
+from utils.replay_buffer import ReplayBuffer
+
 
 class Trainer:
     """Trainer for policy gradient agent."""
 
-    def __init__(self, agent, writer, params):
+    def __init__(self, agent, params):
         """Initialize the trainer."""
         self.agent = agent
-        self.writer = writer
-
         self._seed = params['seed']
-        self.render = params['render']
         self.max_episode = params['max_episode']
-        self.random_expl = params['random_expl']
-        self.critic_update = params['critic_update']
-        self.actor_update = params['actor_update']
-        self.critic_threshold = params['critic_threshold']
         self.savepath = params['savepath']
-
         self.device = params['device']
-        self.n_iter = 0  # number of iteration of sampling
-        self.episode = 0
-
         self._fix_random_seed(self._seed)
+        # If we use target network, initialize the target network
+        # via the critic.
+        if self.agent.use_target:
+            self.agent._update_target()
 
     def _fix_random_seed(self, seed):
         np.random.seed(seed)
@@ -39,92 +35,28 @@ class Trainer:
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    def run_one_episode(self, episode):
-        """Train one episode."""
-        accumulated_rewards = 0
-        # initialize the environment
-        ob = self.agent.env.reset()
-        if self.render:
-            self.agent.env.render()
-        done = False
-        t = 0
-        while not done:
-            self.n_iter += 1  # n_iter starts from 1 not from 0
-            ob_tsr = torch.tensor([ob],
-                                  dtype=torch.float32,
-                                  device=self.device)
-            # if the number of iteration is small, we choose random action
-            if self.n_iter < self.random_expl:
-                action = self.agent.env.action_space.sample()
-            else:
-                action = self.agent.actor.get_action(ob_tsr,
-                                                     'epsilon-greedy',
-                                                     0.1)
-
-            ob_next, reward, done, _ = self.agent.env.step(action)
-            if self.render:
-                self.agent.env.render()
-            accumulated_rewards += reward
-
-            self.agent.buffer.add_paths([t, ob, action, reward, ob_next, done])
-            ob = ob_next
-            # if the agent is exploring randomly or there is no enough data,
-            # continue collecting data without learning.
-            if (self.n_iter < self.random_expl or
-                    self.agent.buffer.length < self.agent.buffer.capacity//5):
-                continue
-
-            if self.n_iter % self.critic_update == 0:
-                if not self.agent.buffer.can_sample(
-                        self.agent.critic.params['batch_size']):
-                    continue
-                critic_loss = self.agent.critic_update()
-                if self.n_iter % (2 * self.critic_update) == 0:
-                    self.writer.add_scalar('loss/critic',
-                                           critic_loss,
-                                           self.n_iter)
-                print("episode-{} \t\t critic loss: {}".format(episode,
-                                                               critic_loss))
-            if self.n_iter % self.actor_update == 0:
-                if not self.agent.buffer.can_sample(
-                        self.agent.actor.params['batch_size']):
-                    continue
-                actor_loss = self.agent.actor_update()
-                if self.n_iter % (2 * self.actor_update) == 0:
-                    self.writer.add_scalar('loss/actor',
-                                           actor_loss,
-                                           self.n_iter)
-                print("episode-{} \t\t actor loss: {}".format(episode,
-                                                              actor_loss))
-            # if done, close environment
-            self.agent.env.close()
-        return accumulated_rewards
-
     def run_training_loop(self):
         """Run training loop."""
-        assert self.episode < self.max_episode,\
+        assert self.agent.episode < self.max_episode,\
             'already done for maximal episode'
-        while self.episode < self.max_episode:
+        while self.agent.episode < self.max_episode:
             # train one episode
-            accumulated_rewards = self.run_one_episode(self.episode)
-            self.writer.add_scalar('Total Rewards',
-                                   accumulated_rewards,
-                                   self.episode)
+            accumulated_rewards = self.agent.train_one_episode()
+            self.agent.writer.add_scalar('Total Rewards',
+                                         accumulated_rewards,
+                                         self.agent.episode)
             self.agent.history['rewards'].append(accumulated_rewards)
             # Stop learning if critic "converges".
-            if (self.episode % 10 == 0 and
+            if (self.agent.episode % 10 == 0 and
                     len(self.agent.history['critic_loss']) > 10):
                 recent_crit_loss = np.array(
                         self.agent.history['critic_loss'][-10:])
                 mean_loss = recent_crit_loss.mean()
-                if mean_loss < self.critic_threshold:
-                    print("Early stopping with mean loss : {}!!".format(
-                        mean_loss))
+                if mean_loss < self.agent.critic_threshold:
+                    print(f"Early stopping with mean loss : {mean_loss}!!")
                     break
-            # Save the parameters of models if ...
-            if self.episode % 50 == 0:
-                self.agent.save(self.savepath, self.episode)
-            self.episode += 1 
+        # Save the parameters of models if ...
+        self.agent.save(self.savepath)
 
 
 def get_args():
@@ -191,9 +123,13 @@ if __name__ == "__main__":
             }
     agent_params = {
             'gamma': args.gamma,
+            'render': args.render,
+            'random_expl': args.random_exploration,
+            'critic_update': args.critic_update,
+            'actor_update': args.actor_update,
+            'critic_threshold': args.critic_threshold,
             }
     actor_params.update(params)
-
     critic_params.update(params)
 
     # CPU/GPU device choice
@@ -203,47 +139,46 @@ if __name__ == "__main__":
         device = torch.device('cpu')
     else:
         device = torch.device('cuda:{}'.format(args.cuda))
-    print('Use {}'.format(device))
-    time.sleep(0.5)
+    print(f'Use {device}')
 
     actor = Actor(env, actor_params)
-    critic = Critic(critic_params, q=True)  # Q-function
+    critics = list()
+    for _ in range(2):
+        critics.append(Critic(critic_params, q=True))
     actor.to(device)
-    critic.to(device)
+    for idx in range(2):
+        critics[idx].to(device)
+    assert len(critics) == 2
 
     actor_optim = torch.optim.Adam(actor.parameters(),
                                    lr=actor.params['learning_rate'])
-    critic_optim = torch.optim.Adam(critic.parameters(),
-                                    lr=critic.params['learning_rate'])
+    critic_optim = torch.optim.Adam(critics[0].parameters(),
+                                    lr=critics[0].params['learning_rate'])
+    # summary writer for tensorboard
+    writer = SummaryWriter()
 
     # create the actor-critic agent
     agent_params.update(params)
     memory = ReplayBuffer(CAPACITY)
-    agent = Agent(env, actor, critic, memory, actor_optim, critic_optim,
-                  agent_params, device)
+    agent = Agent(env, actor, critics, memory, actor_optim, critic_optim,
+                  agent_params, device, writer)
 
     # Initialize or load the model
     if not LOAD:
         agent.actor._initialize()
-        agent.critic._initialize()
+        for critic in agent.critics:
+            critic._initialize()
     else:
         agent.load(LOAD)
 
-    # summary writer for tensorboard
-    writer = SummaryWriter()
     # Parameters for trainer
     trainer_params = {
             'seed': args.seed,
-            'render': args.render,
             'max_episode': args.max_episode,
-            'random_expl': args.random_exploration,
-            'critic_update': args.critic_update,
-            'actor_update': args.actor_update,
-            'critic_threshold': args.critic_threshold,
             'savepath': args.savepath,
             'device': device,
             }
-    trainer = Trainer(agent, writer, trainer_params)
+    trainer = Trainer(agent, trainer_params)
     trainer.run_training_loop()
-    print("Stop learning after {} episodes and {} steps!".format(trainer.episode,
-                                                                 trainer.n_iter))
+    print(f"Stop learning after {trainer.agent.episode} episodes and \
+          {trainer.agent.n_iter} steps!")
