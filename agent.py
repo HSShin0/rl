@@ -11,12 +11,14 @@ Note:
         becomes "r - V(s)", which looks inadequate.
         MORE RIGOROUS REASON ??
     2. target networks
+        How to implement it for "soft" targeting?
+    3. episode
+        Need to change the :meth load: because the :param episode: is not
+        used in the proper manner.
 """
-import time
 import numpy as np
 import os
 import torch
-import torch.nn as nn
 
 
 class Agent:
@@ -33,8 +35,10 @@ class Agent:
         self.device = device
 
         if isinstance(critic, list):
-            assert isinstance(critic_optim, list) and len(critic_optim) == len(critic) == 2, \
-                    'Wrong number of critics and optimizers for target networks'
+            assert (isinstance(critic_optim, list) and
+                    len(critic_optim) == len(critic) == 2), \
+                    'Wrong number of critics and optimizers \
+                    for target networks'
             self.use_target = True
             self.critics = self.critic
             self.critic = self.critics[0]
@@ -63,27 +67,31 @@ class Agent:
     def _update_target(self):
         """Update target network."""
         if self.use_target:
-            for cri_param, tar_param in zip(self.critic.parameters(), self.target.parameters()):
+            for cri_param, tar_param in zip(self.critic.parameters(),
+                                            self.target.parameters()):
                 with torch.no_grad():
                     tar_param.copy_(cri_param)
+
+            '''
             def _test():
                 batch_size = self.critic.params['batch_size']
                 if not self.buffer.can_sample(batch_size):
                     return None
                 # Sampling a batch of paths from the replay buffer
-                t, obs, act, rew, obs_next, done = self.get_batch_samples(batch_size, recent=False)
+                t, obs, act, rew, obs_next, done = \
+                        self.get_batch_samples(batch_size, recent=False)
                 err = torch.mean(abs(self.critic(obs) - self.target(obs)))
                 assert err < 1e-6, 'wrong update'
                 return 0
-            #with torch.no_grad():
-            #    _test()
-            
+            with torch.no_grad():
+                _test()
+            '''
 
-
-    def advantage(self, obser, reward, obser_next, done=None, critic_learning=False):
+    def advantage(self, obser, reward, obser_next, done=None,
+                  critic_learning=False):
         """
         Compute advantage.
-        
+
         obser (torch.FloatTensor): shape [N, (shape of observation_space)]
 
         return (torch.Tensor): shape [N, 1]
@@ -106,16 +114,17 @@ class Agent:
         return advantage
 
     def get_batch_samples(self, batch_size, recent=False):
-        """
-        Sampling a batch of ("recent" if recent=True) paths from the replay buffer.
-        """
+        """Sample a batch of paths from the replay buffer."""
         samples = self.buffer.get_samples(batch_size, recent)
 
         timestep = np.zeros(batch_size, dtype=np.int16)
-        obser = torch.zeros((batch_size, self.obser_n), dtype=torch.float32, device=self.device)
+        obser = torch.zeros((batch_size, self.obser_n),
+                            dtype=torch.float32, device=self.device)
         action = torch.zeros(batch_size, dtype=torch.long, device=self.device)
-        reward = torch.zeros(batch_size, dtype=torch.float32, device=self.device) 
-        obser_next = torch.zeros((batch_size, self.obser_n), dtype=torch.float32, device=self.device)
+        reward = torch.zeros(batch_size,
+                             dtype=torch.float32, device=self.device)
+        obser_next = torch.zeros((batch_size, self.obser_n),
+                                 dtype=torch.float32, device=self.device)
         done = np.empty(batch_size, dtype=np.bool)
 
         for idx, sample in enumerate(samples):
@@ -141,10 +150,10 @@ class Agent:
         # Compute advantage
         advantage = self.advantage(obser,
                                    reward,
-                                   obser_next) # (batch_size, n_action)
+                                   obser_next)  # (batch_size, n_action)
         # policy logit for actions in batch samples
-        logit = policy_logit[range(batch_size), action] # (batch_size,)
-        loss = -(logit.unsqueeze(1) * advantage ).mean(dim=0)[0]
+        logit = policy_logit[range(batch_size), action]  # (batch_size,)
+        loss = -(logit.unsqueeze(1) * advantage).mean(dim=0)[0]
         self.actor_optim.zero_grad()
         loss.backward()
         self.actor_optim.step()
@@ -159,8 +168,10 @@ class Agent:
         if not self.buffer.can_sample(batch_size):
             return None
         # Sampling a batch of paths from the replay buffer
-        t, obs, act, rew, obs_next, done = self.get_batch_samples(batch_size, recent=False)
-        advantage = self.advantage(obs, rew, obs_next, done, critic_learning=True)
+        t, obs, act, rew, obs_next, done = \
+            self.get_batch_samples(batch_size, recent=False)
+        advantage = self.advantage(obs, rew, obs_next, done,
+                                   critic_learning=True)
         loss = torch.norm(advantage, p=2) / batch_size
         # Gradient descent
         self.critic_optim.zero_grad()
@@ -170,9 +181,10 @@ class Agent:
         loss_np = loss.detach().cpu().numpy()
         self.history['critic_loss'].append(loss_np)
 
-        self.n_critic_update += 1 
-        # Exchange critic and target network 
-        if self.use_target and self.n_critic_update % self._every_target_update == 0:
+        self.n_critic_update += 1
+        # Update target network
+        if (self.use_target and
+                self.n_critic_update % self._every_target_update == 0):
             self._update_target()
         return loss_np
 
@@ -190,8 +202,8 @@ class Agent:
                     'critic_state_dict': self.critic.state_dict(),
                     'actor_optimizer_state_dict': self.actor_optim.state_dict(),
                     'critic_optimizer_state_dict': self.critic_optim.state_dict(),
-                    }, path 
-                    )
+                    }, path
+                   )
         print("Saved the agent to {}".format(path))
 
     def load(self, filename):
